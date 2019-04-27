@@ -10,6 +10,20 @@ AuthenticationCleartextPassword = b'\x52\x00\x00\x00\x08\x00\x00\x00\x03'
 
 ReadyForQuery = b'\x5A\x00\x00\x00\x05\x49' # == Z0005I , the last I stand for Idle 
 
+Query = ord('Q')
+
+def CommandComplete(tag):
+    lenghtTag = len(tag)
+    lengthMessage = lenghtTag + 1 + 4 # one for the \00 and 4 for the Int32
+    # assuming that tag is smaller than 256 bytes
+    bytesLenght = b'\x00\x00\x00' + bytes([lengthMessage])
+    bytesBody = bytes(tag, "utf-8") + b'\x00'
+    return b'\x43' + bytesLenght + bytesBody
+
+def ExecuteQuery(query):
+    firstToken = query.split(' ')[0]
+    return firstToken
+
 class PostgresProtocol(asyncio.Protocol):
     def __init__(self):
         self.state = "initial"
@@ -21,6 +35,14 @@ class PostgresProtocol(asyncio.Protocol):
             # we don't require a password
             self.transport.write(AuthenticationOk)
             # good to go for the first query!
+            self.transport.write(ReadyForQuery)
+            self.state = "readyForQuery"
+        if self.state == "readyForQuery" and data[0] == Query:
+            lenght = int.from_bytes(data[1:5], "big")
+            strLenght = lenght - 4
+            query = data[5:].decode("utf-8")
+            result = ExecuteQuery(query)
+            self.transport.write(CommandComplete(result))
             self.transport.write(ReadyForQuery)
         return
 

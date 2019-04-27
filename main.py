@@ -1,4 +1,5 @@
 import asyncio
+import redis
 
 SSLRequestCode = b'\x04\xd2\x16\x2f' # == hex(80877103)
 StartupMessageCode = b'\x00\x03\x00\x00' # == hex(196608)
@@ -26,7 +27,13 @@ def ExecuteQuery(query):
 
 class PostgresProtocol(asyncio.Protocol):
     def __init__(self):
+        self.redis = redis.Redis()
         self.state = "initial"
+
+    def _execute_query(self, query):
+        result = self.redis.execute_command("REDISQL.EXEC", "DB", query)
+        firstToken = query.split(' ')[0]
+        return firstToken
 
     def _reply(self, data):
         if self.state == "initial" and data[4:8] == SSLRequestCode:
@@ -40,13 +47,14 @@ class PostgresProtocol(asyncio.Protocol):
         if self.state == "readyForQuery" and data[0] == Query:
             lenght = int.from_bytes(data[1:5], "big")
             strLenght = lenght - 4
-            query = data[5:].decode("utf-8")
-            result = ExecuteQuery(query)
+            query = data[5:-1].decode("utf-8")
+            result = self._execute_query(query)
             self.transport.write(CommandComplete(result))
             self.transport.write(ReadyForQuery)
         return
 
     def connection_made(self, transport):
+        print('New Connection Made')
         self.transport = transport
 
     def data_received(self, data):

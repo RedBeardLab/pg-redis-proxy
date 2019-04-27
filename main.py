@@ -1,5 +1,9 @@
+import string
+import random
+
 import asyncio
 import redis
+
 
 SSLRequestCode = b'\x04\xd2\x16\x2f' # == hex(80877103)
 StartupMessageCode = b'\x00\x03\x00\x00' # == hex(196608)
@@ -13,6 +17,9 @@ ReadyForQuery = b'\x5A\x00\x00\x00\x05\x49' # == Z0005I , the last I stand for I
 
 Query = ord('Q')
 
+def random_stream(size=6, chars=string.ascii_uppercase + string.digits):
+    return ''.join(random.choice(chars) for _ in range(size))
+
 def CommandComplete(tag):
     lenghtTag = len(tag)
     lengthMessage = lenghtTag + 1 + 4 # one for the \00 and 4 for the Int32
@@ -21,22 +28,73 @@ def CommandComplete(tag):
     bytesBody = bytes(tag, "utf-8") + b'\x00'
     return b'\x43' + bytesLenght + bytesBody
 
-def ExecuteQuery(query):
-    firstToken = query.split(' ')[0]
-    return firstToken
+def RowDescription(rows):
+    body = bytes(0)
+    for rowType, rowName in rows:
+        fieldName = bytes(rowName, "utf-8") + b'\x00'
+        tableId = bytes(4)
+        columnId = bytes(2)
+        dataTypeId = bytes(4)
+        if rowType == "int":
+            dataSize = bytes([0, 8])
+        if rowType == "string":
+            dataSize = bytes([255, 255])
+        typeModifier = bytes(4)
+        formatCode = (0).to_bytes(2, byteorder="big")
+        body += fieldName + tableId + columnId + dataTypeId + dataSize + typeModifier + formatCode
+    totalLen = len(body) + 4 + 2
+    totalLenBytes = totalLen.to_bytes(4, byteorder="big")
+    totalFieldsBytes = len(rows).to_bytes(2, byteorder="big")
+    return bytes([ord('T')]) + totalLenBytes + totalFieldsBytes + body
+
+def DataRow(row):
+    body = bytes(0)
+    for fieldType, fieldValue in row.items():
+        typeField, nameField = fieldType.decode("utf-8").split(":")
+        if typeField == "int":
+            value = fieldValue.decode()
+            lenght = (len(value) + 1).to_bytes(4, byteorder="big")
+            #valueBytes = value.to_bytes(8, byteorder="big")
+            valueBytes = bytes(value, "utf-8") + b'\x00'
+            body += lenght + valueBytes
+    totalLen = len(body) + 4 + 2
+    totalLenBytes = totalLen.to_bytes(4, byteorder="big")
+    totalFieldsBytes = len(row).to_bytes(2, byteorder="big")
+    return bytes([ord('D')]) + totalLenBytes + totalFieldsBytes + body
 
 class PostgresProtocol(asyncio.Protocol):
     def __init__(self):
         self.redis = redis.Redis()
         self.state = "initial"
+        self.db = "DB"
 
     def _execute_query(self, query):
-        result = self.redis.execute_command("REDISQL.EXEC", "DB", query)
         firstToken = query.split(' ')[0]
         if firstToken.upper() == "INSERT":
+            result = self.redis.execute_command("REDISQL.EXEC", self.db , query)
             numberInserted = result[1]
-            return "INSERT 0 " + str(numberInserted)
-        return firstToken
+            self.transport.write(CommandComplete("INSERT 0 " + str(numberInserted)))
+        elif firstToken.upper() == "SELECT":
+            stream = random_stream()
+            result = self.redis.execute_command("REDISQL.QUERY.INTO", stream, self.db, query)
+            streamResult = self.redis.execute_command("XREAD",  "COUNT", "1", "STREAMS", stream, "0")
+            firstRow = streamResult[0][1][0][1]
+            rows = []
+            for key, _ in firstRow.items():
+                rowType, rowName = key.decode("utf-8").split(':')
+                rowType, rowName = rowType.strip(), rowName.strip()
+                rows.append((rowType, rowName,))
+            self.transport.write(RowDescription(rows))
+            returnedRows = self.redis.xread({stream: "0"})[0][1]
+            for _, row in returnedRows:
+                self.transport.write(DataRow(row))
+            self.transport.write(CommandComplete("SELECT"))
+        else:
+            self.redis.execute_command("REDISQL.EXEC", self.db , query)
+            self.transport.write(CommandComplete(firstToken))
+
+        self.transport.write(ReadyForQuery)
+
 
     def _reply(self, data):
         if self.state == "initial" and data[4:8] == SSLRequestCode:
@@ -52,8 +110,6 @@ class PostgresProtocol(asyncio.Protocol):
             strLenght = lenght - 4
             query = data[5:-1].decode("utf-8")
             result = self._execute_query(query)
-            self.transport.write(CommandComplete(result))
-            self.transport.write(ReadyForQuery)
         return
 
     def connection_made(self, transport):

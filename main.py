@@ -33,6 +33,9 @@ class PostgresProtocol(asyncio.Protocol):
     def _execute_query(self, query):
         result = self.redis.execute_command("REDISQL.EXEC", "DB", query)
         firstToken = query.split(' ')[0]
+        if firstToken.upper() == "INSERT":
+            numberInserted = result[1]
+            return "INSERT 0 " + str(numberInserted)
         return firstToken
 
     def _reply(self, data):
